@@ -1,19 +1,20 @@
 from simulacrum.fake_data_helpers import random_date
 from simulacrum import utils
+from simulacrum.i2b2 import i2b2, query
 
+from collections import namedtuple
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
 from random import choice
 from pathlib import Path
 
 
-class Subject:
+class Subject(namedtuple('Subject', ['patient', 'encounters', 'features'], defaults=[dict()])):
     """Class representing a patient/study subject.
 
     May or may not be useful. Present to show illustrate framework design possibilities.
     """
     pass
-
 
 class Database:
     """Defines the data available (i.e. i2b2, a sql database; etc)
@@ -21,51 +22,35 @@ class Database:
     Think of 'patients' and 'encounters' here as sql tables.
     """
     
-    patients = [
-        dict(
-            id=i, 
-            sex=choice(['M', 'F']),
-            dob=random_date()
-        ) for i in range(30)
-    ]
+    patients = query(i2b2.patient_dimension)
 
-    encounters = [
-        dict(
-            id=p['id'] * 3,
-            patient_id=p['id'],
-            date=random_date(earliest=p['dob'])
-        ) for p in patients if p['id'] % 3 == 0
-    ]
-
+    encounters = query(i2b2.observation_fact)
 
 class Population:
     """This would define how to filter the Database to get the study population.
 
     i.e. "a list of patient IDs is obtained for everybody that meets the general criteria..."
     """
-    
-    @classmethod
-    def load(cls):
+
+    def load(self):
         # patients with encounters
         query = [
-            {
-                "patient": p,
-                "encounters": [e for e in Database.encounters if e['patient_id'] == p['id']]
-            }
+            Subject(
+                p,
+                [e for e in Database.encounters if e.patient_num == p.patient_num]
+            )
             for p in Database.patients
         ]
-        return [p for p in query if p['encounters'] != []]
+        return [p for p in query if p.encounters != []]
 
-    @classmethod
-    def load_patient_ids(cls):
-        return [p['patient']['id'] for p in cls.load()]
+    def load_patient_ids(self):
+        return set(subject.patient.patient_num for subject in self.load())
 
-    @classmethod
-    def load_demographic_table(cls):
-        ids = Population.load_patient_ids()
+    def load_demographic_table(self):
+        ids = self.load_patient_ids()
         demographic_table = [
             p for p in Database.patients
-            if p['id'] in ids
+            if p.patient_num in ids
         ]
         return demographic_table
 
@@ -132,7 +117,7 @@ class Study:
     "study matrix" (can't remember if that is the correct term, please correct my terminology as needed).
     """
 
-    def __init__(self, name, population, eligibility, study_design):
+    def __init__(self, name, population: Population, eligibility, study_design):
         self.name = name # i.e. anything: Metformin Study A, Study 09024, etc
         self.population = population
         self.eligibility = eligibility
@@ -150,6 +135,7 @@ class Study:
         """
         print(f"caching {fn} table")
         fn = f"{fn}.csv"
+        return
         utils.store_table(self.outpath / fn, rows)
 
     def load_population(self):
@@ -165,10 +151,10 @@ class Study:
     def feature_engineering(self, fact_table):
         # calculate eligibility indicators, etc
         for row in fact_table:
-            row['is_medicare_eligible'] = relativedelta(datetime.utcnow(), row['patient']['dob']).years > 70
+            row.features['is_medicare_eligible'] = relativedelta(datetime.utcnow(), row.patient.birth_date).years > 70
         # also run nlp, etc here
         for row in fact_table:
-            row['has_dementia'] = choice((True, False,))
+            row.features['has_dementia'] = choice((True, False,))
         # output is the study matrix
         return fact_table
 
