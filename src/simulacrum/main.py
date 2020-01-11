@@ -82,6 +82,10 @@ class Eligibility:
     See `Study.apply_eligibility` for usage
     """
 
+    __author = "John Smith, PhD"
+    __last_updated = "2019-12-30"
+    __version = "v3"
+
     def apply(self, table):
         """filters the table based on eligibility criteria"""
         # i.e. if row['is_dead'] drop row
@@ -119,6 +123,7 @@ class Study:
 
     def __init__(self, name, population: Population, eligibility, study_design):
         self.name = name # i.e. anything: Metformin Study A, Study 09024, etc
+        self.__hashed_name = "abc9234fas90dfh"
         self.population = population
         self.eligibility = eligibility
         self.study_design = study_design
@@ -130,56 +135,88 @@ class Study:
         outpath.mkdir(exist_ok=True, parents=True)
         self.outpath = outpath
 
-    def cache(self, fn, rows):
+    def load_from_cache(self, step_name, step_version=None):
+        if step_version is None:
+            step_version = "latest_version"
+        q = self.database.query(
+            f"""
+            select * 
+            from step_name_{step_version}
+            """
+        )
+        return q
+
+    def save_output(self, step_name, rows):
         """Exports the intermediate files as needed.
         """
-        print(f"caching {fn} table")
-        fn = f"{fn}.csv"
+        print(f"saving {step_name} table")
+        step_name = f"{step_name}.csv"
         return
-        utils.store_table(self.outpath / fn, rows)
+        utils.store_table(self.outpath / step_name, rows)
+        utils.save_step_run_metadata(step_name)
 
     def load_population(self):
         """This would load the base population ids, and join to their demographic info
         """
+        self.next = self.load_fact_table
         return self.population.load_demographic_table()
 
     def load_fact_table(self):
         """This would load the full fact table, i.e. joined encounters
         """
-        return self.population.load()
+        self.next = self.feature_engineering
+        self._fact_table = self.population.load()
+        return self._fact_table
 
-    def feature_engineering(self, fact_table):
+    def feature_engineering(self):
+        fact_table = self._fact_table
         # calculate eligibility indicators, etc
         for row in fact_table:
-            row.features['is_medicare_eligible'] = relativedelta(datetime.utcnow(), row.patient.birth_date).years > 70
+            row.features['ckd'] = relativedelta(datetime.utcnow(), row.patient.birth_date).years > 71
         # also run nlp, etc here
         for row in fact_table:
             row.features['has_dementia'] = choice((True, False,))
         # output is the study matrix
+        self._feature_table = fact_table
+        self.next = self.apply_eligibility
         return fact_table
 
-    def apply_eligibility(self, feature_table):
+    def apply_eligibility(self):
+        self.next = None
         return self.study_design.apply(
             self.eligibility.apply(
-                feature_table
+                self._feature_table
             )
         )
 
-    def run(self):
+    @property
+    def _steps(self):
+        return {
+            "demographics": self.load_population,
+            "facts": self.load_fact_table,
+            "features": self.feature_engineering,
+            "study_matrix": self.apply_eligibility,
+        }
+
+    def run(self, start_at=None, end_after=None):
         """Runs the study
         """
         self.__setup()
-        pop = self.load_population()
-        self.cache("demographics", pop)
-        patient_facts = self.load_fact_table()
-        self.cache("facts", patient_facts)
-        feature_table = self.feature_engineering(patient_facts)
-        self.cache("features", feature_table)
-        final = self.apply_eligibility(feature_table)
-        self.cache("study_matrix", final)
+        if start_at:
+            start_at = self._steps.get(start_at)
+            start_at()
+        else:
+            list(self._steps.values())[0]()
+        while self.next is not None:
+            self.next()
 
 pop = Population()
 elig = Eligibility()
 design = AsTreatedStudy()
 
-Study("my_fake_study", pop, elig, design).run()
+my_study = Study("my_metformin_study", pop, elig, design)
+my_study.run()
+
+# my_study.run(end_after="facts")
+
+# my_study.run(start_at="features")
